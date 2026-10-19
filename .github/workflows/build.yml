@@ -1,0 +1,39 @@
+name: Windows build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check PowerShell syntax and compile
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($file in Get-ChildItem -Recurse -Filter *.ps1) {
+            $tokens = $null
+            $errors = $null
+            $null = [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$tokens, [ref]$errors)
+            if ($errors.Count) { throw ($errors | Out-String) }
+          }
+          .\Build.ps1
+      - name: Upload compiled programs
+        uses: actions/upload-artifact@v4
+        with:
+          name: ScreenQuiet-windows-x64
+          path: |
+            ScreenQuiet.exe
+            LauncherBridge.exe
+            tests/ScreenQuietBridgeProbe.exe
+            *.ps1
+            README.md
+            docs/
+            LICENSE
+            THIRD-PARTY-NOTICES.txt

@@ -1,0 +1,20 @@
+# Compiled artifacts (build locally; downloadable packages go in Releases).
+*.exe
+*.dll
+*.pdb
+*.zip
+
+# Machine-specific diagnostics and recovery state must never be published.
+/diagnosis.txt
+/routing-validation.json
+/virtual-validation.txt
+/virtual-validation.txt.plan.xml
+*.log
+*.error.txt
+*.forwarded.txt
+*.suppressed.txt
+*.other-path.txt
+display-recovery.xml
+.vs/
+bin/
+obj/
