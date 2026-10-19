@@ -10,6 +10,9 @@ if ($sqHasVendorRule) {
     $sqCleanup = Start-Process -FilePath "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" -ArgumentList $sqCleanupArgs -Verb RunAs -PassThru -Wait -WindowStyle Hidden
     if ($sqCleanup.ExitCode -ne 0) { throw 'Vendor launch rule cleanup did not complete; installation retained.' }
 }
+. (Join-Path $PSScriptRoot 'StartupTask.ps1')
+$sqTask = Get-SqStartupTask
+if ($sqTask) { $null = Disable-ScheduledTask -TaskName $sqTaskName }
 if (Test-Path -LiteralPath $sqExecutable) {
     Start-Process -FilePath $sqExecutable -ArgumentList '--stop' -Wait -WindowStyle Hidden
     $sqDeadline = [DateTime]::UtcNow.AddSeconds(7)
@@ -17,14 +20,15 @@ if (Test-Path -LiteralPath $sqExecutable) {
     if (Test-Path -LiteralPath $sqRecoveryFile) { throw 'Display recovery is pending. Controller and files were retained.' }
 }
 foreach ($sqExisting in @(Get-Process -Name ScreenQuiet -ErrorAction SilentlyContinue)) {
-    if ($sqExisting.Path -eq $sqExecutable) { Stop-Process -Id $sqExisting.Id -ErrorAction SilentlyContinue }
+    if ($sqExisting.Path -eq $sqExecutable -and -not $sqExisting.WaitForExit(7000)) { throw 'Controller did not stop; files retained.' }
 }
+if ($sqTask) { Unregister-ScheduledTask -TaskName $sqTaskName -Confirm:$false }
 $sqRunKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 $sqCurrent = (Get-ItemProperty -LiteralPath $sqRunKey -ErrorAction SilentlyContinue).ScreenQuiet
 if ($sqCurrent -eq ('"' + $sqExecutable + '"')) { Remove-ItemProperty -LiteralPath $sqRunKey -Name ScreenQuiet }
 $sqShortcut = Join-Path ([Environment]::GetFolderPath('Programs')) 'ScreenQuiet - Restore screen.lnk'
 if (Test-Path -LiteralPath $sqShortcut) { Remove-Item -LiteralPath $sqShortcut }
-foreach ($sqName in @('ScreenQuiet.exe', 'THIRD-PARTY-NOTICES.txt', 'Uninstall.ps1', 'Configure-VendorRoute.ps1')) {
+foreach ($sqName in @('ScreenQuiet.exe', 'THIRD-PARTY-NOTICES.txt', 'Uninstall.ps1', 'Configure-VendorRoute.ps1', 'StartupTask.ps1')) {
     $sqFile = Join-Path $sqInstallDir $sqName
     if (Test-Path -LiteralPath $sqFile) { Remove-Item -LiteralPath $sqFile }
 }

@@ -168,6 +168,12 @@ namespace ScreenQuiet
             for(int i=0;i<b.PathCount;i++) if(!keys.Contains(Key(b,i))) return false;
             return true;
         }
+        public static string Summary(DisplaySnapshot s)
+        {
+            int internalCount=0,parsecCount=0;
+            for(int i=0;i<s.PathCount;i++) { if(IsInternal(s,i)) internalCount++; else if(IsParsec(s,i)) parsecCount++; }
+            return "active="+s.PathCount+", internal="+internalCount+", parsec="+parsecCount;
+        }
         public static void Validate(DisplaySnapshot s)
         { CheckResult(SetDisplayConfig(s.PathCount,s.Paths,s.ModeCount,s.ModeCount==0?null:s.Modes,0x20|0x40|0x400)); }
         public static void Apply(DisplaySnapshot s)

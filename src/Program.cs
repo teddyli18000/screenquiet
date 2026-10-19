@@ -25,7 +25,7 @@ namespace ScreenQuiet
             {
                 if(args.Length>0 && args[0]=="--watch") return Watch(args);
                 if(args.Length>0 && args[0]=="--suppress-vendor") return 0;
-                if(args.Length>0 && args[0]=="--validate-virtual") return ValidateVirtual(args[1]);
+                if(args.Length>0 && args[0]=="--validate-virtual") return ValidateVirtual(args[1],args.Length>2?Int32.Parse(args[2]):0);
                 if(args.Length>0 && args[0]=="--diagnose")
                 {
                     string report="ScreenQuiet read-only diagnosis\r\nParsec installed="+ParsecDriver.IsInstalled()+"\r\n";
@@ -67,10 +67,18 @@ namespace ScreenQuiet
                     if(!first) return 0;
                     try
                     {
+                        Log("Controller starting; PID="+Process.GetCurrentProcess().Id+"; managed="+(args.Length>0 && args[0]=="--managed"));
+                        AppDomain.CurrentDomain.UnhandledException+=delegate(object sender,UnhandledExceptionEventArgs e) { Log("Unhandled exception: "+e.ExceptionObject); };
+                        AppDomain.CurrentDomain.ProcessExit+=delegate { Log("Controller process exiting"); };
                         if(File.Exists(RecoveryFile)) { DisplayTopology.Restore(DisplaySnapshot.Load(RecoveryFile)); File.Delete(RecoveryFile); Log("Recovered previous session"); }
                         Application.EnableVisualStyles();
                         Application.SetUnhandledExceptionMode(UnhandledExceptionMode.ThrowException);
-                        using(Controller c=new Controller()) Application.Run(c);
+                        using(Controller c=new Controller())
+                        {
+                            try { Application.Run(c); }
+                            finally { c.EnsureStopped(); }
+                            if(!c.StopRequested) throw new InvalidOperationException("Controller message loop ended without an explicit stop; scheduler will retry.");
+                        }
                     }
                     finally { single.ReleaseMutex(); }
                 }
@@ -78,8 +86,9 @@ namespace ScreenQuiet
             }
             catch(Exception ex) { Log("ERROR "+ex); return 1; }
         }
-        static int ValidateVirtual(string reportPath)
+        static int ValidateVirtual(string reportPath,int holdSeconds)
         {
+            if(holdSeconds<0 || holdSeconds>120) throw new ArgumentOutOfRangeException("holdSeconds");
             DisplaySnapshot original=DisplayTopology.Read(false); DisplayTopology.CheckInitial(original);
             var before=DisplayTopology.AvailableKeys();
             original.Save(RecoveryFile); ParsecDriver driver=null;
@@ -91,8 +100,18 @@ namespace ScreenQuiet
                 bool internalActive=false;
                 for(int i=0;i<active.PathCount;i++) if(DisplayTopology.IsInternal(active,i)) internalActive=true;
                 if(!internalActive) throw new InvalidOperationException("Internal panel unexpectedly inactive; restoring");
+                DateTime until=DateTime.UtcNow.AddSeconds(holdSeconds);
+                do
+                {
+                    DisplaySnapshot held=DisplayTopology.Read(false);
+                    bool stillInternal=false;
+                    for(int i=0;i<held.PathCount;i++) if(DisplayTopology.IsInternal(held,i)) stillInternal=true;
+                    if(!stillInternal) throw new InvalidOperationException("Internal panel unexpectedly inactive during driver hold check");
+                    if(driver.Health.IndexOf("failure=none",StringComparison.Ordinal)<0) throw new InvalidOperationException(driver.Health);
+                    Thread.Sleep(100);
+                } while(DateTime.UtcNow<until);
                 plan.Save(reportPath+".plan.xml");
-                File.WriteAllText(reportPath,"PASS: virtual display created; internal panel stayed active; virtual-only plan passed SDC_VALIDATE.\r\nVirtual-only plan was NOT applied.\r\n");
+                File.WriteAllText(reportPath,"PASS: virtual display created; internal panel stayed active; virtual-only plan passed SDC_VALIDATE.\r\nVirtual-only plan was NOT applied.\r\nHold seconds="+holdSeconds+"; "+driver.Health+"\r\n");
                 return 0;
             }
             finally
@@ -190,6 +209,8 @@ namespace ScreenQuiet
         EventWaitHandle watchdogPulse;
         Process watchdog;
         bool busy,armed,disposed,wakePending;
+        int topologyMismatchCount;
+        internal bool StopRequested { get; private set; }
         readonly bool observeOnly;
         DateTime ignoreInputUntil,lastHotkey=DateTime.MinValue;
         [DllImport("kernel32.dll",SetLastError=true)] static extern uint SetThreadExecutionState(uint flags);
@@ -211,18 +232,37 @@ namespace ScreenQuiet
                 try { if(Convert.ToUInt32(e.NewEvent["PressTypeDataVal"])==1) { fnGate.Set(); gateReset.Change(3000,Timeout.Infinite); dispatch.BeginInvoke((Action)OnHotkey); } }
                 catch(Exception ex) { Program.Log("WMI event: "+ex.Message); }
             };
+            watcher.Stopped+=delegate(object sender,StoppedEventArgs e)
+            {
+                if(disposed) return;
+                Program.Log("WMI subscription stopped: "+e.Status+"; restarting controller through scheduler");
+                try { dispatch.BeginInvoke((Action)ExitThread); } catch(InvalidOperationException) { }
+            };
             watcher.Start();
             Microsoft.Win32.SystemEvents.SessionSwitch+=OnSessionSwitch;
             Microsoft.Win32.SystemEvents.PowerModeChanged+=OnPowerMode;
             poll=new System.Windows.Forms.Timer { Interval=1000 };
             poll.Tick+=delegate
             {
-                if(stopSignal.WaitOne(0)) { ExitThread(); return; }
+                if(stopSignal.WaitOne(0)) { StopRequested=true; Program.Log("Explicit stop requested"); ExitThread(); return; }
                 if(watchdogPulse!=null) watchdogPulse.Set();
                 if(restoreSignal.WaitOne(0)) Restore();
                 if(armed && !busy)
                 {
-                    try { if(watchdog==null || watchdog.HasExited || !DisplayTopology.SameTargets(quiet,DisplayTopology.Read(false))) { Program.Log("Watchdog exit or external topology change: restoring and disarming"); Restore(); } }
+                    try
+                    {
+                        if(watchdog==null || watchdog.HasExited) { Program.Log("Recovery watchdog exited; restoring and disarming"); Restore(); return; }
+                        DisplaySnapshot current=DisplayTopology.Read(false);
+                        if(DisplayTopology.SameTargets(quiet,current)) topologyMismatchCount=0;
+                        else
+                        {
+                            topologyMismatchCount++;
+                            Program.Log("Display target mismatch #"+topologyMismatchCount+": "+DisplayTopology.Summary(current)+"; "+driver.Health);
+                            // A single query during display re-enumeration is not a new layout.
+                            // Never force the quiet layout over a persistent external change.
+                            if(topologyMismatchCount>=2) { Program.Log("Persistent display target change; restoring and disarming"); Restore(); }
+                        }
+                    }
                     catch(Exception ex) { Program.Log(ex.Message); Restore(); }
                 }
             };
@@ -257,6 +297,7 @@ namespace ScreenQuiet
                 armed=true;
                 DisplayTopology.Apply(quiet);
                 ignoreInputUntil=DateTime.UtcNow.AddMilliseconds(900);
+                topologyMismatchCount=0;
                 Program.Log("Quiet mode active");
             }
             catch(Exception ex)
@@ -280,9 +321,9 @@ namespace ScreenQuiet
             window.Input=input;
         }
         void OnSessionSwitch(object sender,Microsoft.Win32.SessionSwitchEventArgs e)
-        { if(e.Reason!=Microsoft.Win32.SessionSwitchReason.SessionUnlock) dispatch.BeginInvoke((Action)Restore); }
+        { Program.Log("Session change: "+e.Reason); if(e.Reason!=Microsoft.Win32.SessionSwitchReason.SessionUnlock) dispatch.BeginInvoke((Action)Restore); }
         void OnPowerMode(object sender,Microsoft.Win32.PowerModeChangedEventArgs e)
-        { if(e.Mode==Microsoft.Win32.PowerModes.Suspend) dispatch.BeginInvoke((Action)Restore); }
+        { Program.Log("Power change: "+e.Mode); if(e.Mode==Microsoft.Win32.PowerModes.Suspend) dispatch.BeginInvoke((Action)Restore); }
         void StartWatchdog()
         {
             string name="Local\\ScreenQuiet.Watch."+Guid.NewGuid().ToString("N");
@@ -333,5 +374,6 @@ namespace ScreenQuiet
             }
             base.ExitThreadCore();
         }
+        internal void EnsureStopped() { ExitThreadCore(); }
     }
 }

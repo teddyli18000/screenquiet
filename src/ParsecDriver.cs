@@ -28,6 +28,7 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -48,20 +49,22 @@ namespace ScreenQuiet
         private const int DisplayIndexLimit = 16;
         private const int AddTimeoutMilliseconds = 5000;
         private const int IoctlTimeoutMilliseconds = 1000;
-        private const int KeepAlivePeriodMilliseconds = 50;
+        private const int KeepAlivePeriodMilliseconds = 25;
 
         private static readonly Guid DeviceInterfaceGuid = new Guid(
             "00b41627-04c4-429e-a26e-0265cf50c8fa");
 
         private readonly object _sync = new object();
         private readonly SafeFileHandle _device;
-        private readonly Timer _keepAliveTimer;
+        private readonly ManualResetEvent _keepAliveStop = new ManualResetEvent(false);
+        private Thread _keepAliveThread;
+        private long _lastUpdate;
+        private long _maxUpdateGap;
         private readonly HashSet<int> _ownedDisplays = new HashSet<int>();
 
         private Exception _keepAliveFailure;
         private bool _disposing;
         private bool _disposed;
-        private int _keepAliveCallbackRunning;
 
         public ParsecDriver()
         {
@@ -87,15 +90,6 @@ namespace ScreenQuiet
                 throw new Win32Exception(error, "Could not open the Parsec virtual display device.");
             }
 
-            try
-            {
-                _keepAliveTimer = new Timer(KeepAliveTick, null, Timeout.Infinite, Timeout.Infinite);
-            }
-            catch
-            {
-                _device.Dispose();
-                throw;
-            }
         }
 
         /// <summary>
@@ -124,8 +118,18 @@ namespace ScreenQuiet
                 if (!_ownedDisplays.Add(index))
                     throw new InvalidOperationException("The Parsec driver returned an index already owned by this instance.");
 
-                _keepAliveTimer.Change(KeepAlivePeriodMilliseconds, KeepAlivePeriodMilliseconds);
                 ExecuteIoctl(IoctlUpdate, null, 0, IoctlTimeoutMilliseconds);
+                _lastUpdate = Stopwatch.GetTimestamp();
+                if (_keepAliveThread == null)
+                {
+                    // VDD requires updates less than 100 ms apart. A ThreadPool timer
+                    // can miss that deadline while the pool starts or is blocked.
+                    _keepAliveThread = new Thread(KeepAliveLoop);
+                    _keepAliveThread.IsBackground = true;
+                    _keepAliveThread.Name = "ScreenQuiet VDD keepalive";
+                    _keepAliveThread.Priority = ThreadPriority.AboveNormal;
+                    _keepAliveThread.Start();
+                }
                 return index;
             }
         }
@@ -147,9 +151,6 @@ namespace ScreenQuiet
                 ExecuteIoctl(IoctlRemove, input, 0, IoctlTimeoutMilliseconds);
                 _ownedDisplays.Remove(index);
 
-                if (_ownedDisplays.Count == 0)
-                    _keepAliveTimer.Change(Timeout.Infinite, Timeout.Infinite);
-
                 ExecuteIoctl(IoctlUpdate, null, 0, IoctlTimeoutMilliseconds);
                 if (keepAliveFailure != null)
                     throw new InvalidOperationException("The Parsec keep-alive timer failed.", keepAliveFailure);
@@ -158,7 +159,7 @@ namespace ScreenQuiet
 
         public void Dispose()
         {
-            Timer timer;
+            Thread keepAliveThread;
             Exception keepAliveFailure;
 
             lock (_sync)
@@ -170,9 +171,9 @@ namespace ScreenQuiet
                     return;
 
                 _disposing = true;
-                timer = _keepAliveTimer;
+                keepAliveThread = _keepAliveThread;
                 keepAliveFailure = _keepAliveFailure;
-                timer.Change(Timeout.Infinite, Timeout.Infinite);
+                _keepAliveStop.Set();
             }
 
             List<Exception> failures = new List<Exception>();
@@ -181,11 +182,7 @@ namespace ScreenQuiet
 
             try
             {
-                using (ManualResetEvent callbacksDone = new ManualResetEvent(false))
-                {
-                    timer.Dispose(callbacksDone);
-                    callbacksDone.WaitOne();
-                }
+                if (keepAliveThread != null) keepAliveThread.Join();
 
                 lock (_sync)
                 {
@@ -237,6 +234,7 @@ namespace ScreenQuiet
                     finally
                     {
                         _disposed = true;
+                        _keepAliveStop.Dispose();
                         Monitor.PulseAll(_sync);
                     }
                 }
@@ -248,32 +246,39 @@ namespace ScreenQuiet
                 throw new AggregateException("One or more Parsec display cleanup operations failed.", failures);
         }
 
-        private void KeepAliveTick(object state)
+        public string Health
         {
-            if (Interlocked.Exchange(ref _keepAliveCallbackRunning, 1) != 0)
-                return;
-
-            try
+            get
             {
-                lock (_sync)
-                {
-                    if (_disposing || _disposed || _ownedDisplays.Count == 0 || _keepAliveFailure != null)
-                        return;
+                long last=Interlocked.Read(ref _lastUpdate);
+                long age=last==0 ? -1 : (Stopwatch.GetTimestamp()-last)*1000/Stopwatch.Frequency;
+                return "VDD update ageMs="+age+", maxGapMs="+Interlocked.Read(ref _maxUpdateGap)*1000/Stopwatch.Frequency+
+                    ", failure="+(_keepAliveFailure==null ? "none" : _keepAliveFailure.Message);
+            }
+        }
 
-                    try
+        private void KeepAliveLoop()
+        {
+            while (!_keepAliveStop.WaitOne(KeepAlivePeriodMilliseconds))
+            {
+                try
+                {
+                    lock (_sync)
                     {
+                        if (_disposing || _disposed) return;
+                        if (_ownedDisplays.Count == 0) continue;
                         ExecuteIoctl(IoctlUpdate, null, 0, IoctlTimeoutMilliseconds);
-                    }
-                    catch (Exception exception)
-                    {
-                        _keepAliveFailure = exception;
-                        _keepAliveTimer.Change(Timeout.Infinite, Timeout.Infinite);
+                        long now=Stopwatch.GetTimestamp();
+                        long gap=now-Interlocked.Exchange(ref _lastUpdate,now);
+                        if (gap>Interlocked.Read(ref _maxUpdateGap)) Interlocked.Exchange(ref _maxUpdateGap,gap);
                     }
                 }
-            }
-            finally
-            {
-                Interlocked.Exchange(ref _keepAliveCallbackRunning, 0);
+                catch (Exception exception)
+                {
+                    _keepAliveFailure=exception;
+                    Program.Log("VDD keepalive failed: "+Health);
+                    return;
+                }
             }
         }
 
@@ -352,9 +357,9 @@ namespace ScreenQuiet
                     if (!finalResult)
                     {
                         if (waitError == Native.ErrorWaitTimeout)
-                            throw new TimeoutException("The Parsec display IOCTL exceeded its " + timeoutMilliseconds + " ms timeout.", new Win32Exception(finalError));
+                            throw new TimeoutException("Parsec " + IoctlName(ioctl) + " exceeded its " + timeoutMilliseconds + " ms timeout.", new Win32Exception(finalError));
 
-                        throw new Win32Exception(finalError, "The Parsec display IOCTL failed.");
+                        throw new Win32Exception(finalError, "Parsec " + IoctlName(ioctl) + " failed.");
                     }
                 }
 
@@ -374,6 +379,11 @@ namespace ScreenQuiet
                 if (inputBuffer != IntPtr.Zero)
                     Marshal.FreeHGlobal(inputBuffer);
             }
+        }
+
+        private static string IoctlName(uint ioctl)
+        {
+            return ioctl==IoctlUpdate ? "UPDATE" : ioctl==IoctlRemove ? "REMOVE" : ioctl==IoctlAdd ? "ADD" : "IOCTL 0x"+ioctl.ToString("x");
         }
 
         private static string FindDevicePath()

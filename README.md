@@ -2,9 +2,9 @@
 
 > A Windows utility that moves the desktop to a virtual display and restores the built-in panel when physical input is detected.
 
-Fn+F9 关闭内置屏，让桌面和远程开发继续运行；物理输入恢复显示。ScreenQuiet 通过联想 WMI 事件识别 Fn+F9，把桌面放到 Parsec 虚拟显示器上，不改联想 Fn 服务、亮度或音量热键。正常运行时没有托盘图标、任务栏窗口或弹窗，也不提供联网功能。
+Fn+F9 将桌面切换到 Parsec 虚拟显示器，并把内置屏从 Windows 活动布局移除；识别到物理输入后恢复原布局。ScreenQuiet 通过联想 WMI 事件识别 Fn+F9，不改联想 Fn 服务、亮度或音量热键。正常运行时没有托盘图标、任务栏窗口或弹窗，也不提供联网功能。
 
-这是一个实验性工具，已验证的参考设备为 **Lenovo ThinkBook16 G7+ IAH，Windows 11 x64 build 26200**。本次操作记录和未覆盖项见[设计与验证记录](docs/design-and-validation.md)。
+这是一个实验性工具，参考设备为 **Lenovo ThinkBook16 G7+ IAH，Windows 11 x64 build 26200**。近期验证覆盖构建、被动启动、虚拟显示保活和空闲崩溃后的任务补拉；本轮生命周期修订后尚未重新进行真实 Fn+F9/UU 关屏操作。证据范围见[设计与验证记录](docs/design-and-validation.md)。
 
 ## 工作方式
 
@@ -23,7 +23,7 @@ Fn+F9 关闭内置屏，让桌面和远程开发继续运行；物理输入恢�
 
 ## 构建与安装
 
-需要 Windows x64、Windows PowerShell 和 .NET Framework 自带的 C# 5 编译器。构建会在项目目录生成 `ScreenQuiet.exe`、`LauncherBridge.exe` 和 `tests\ScreenQuietBridgeProbe.exe`；参考构建中的控制程序为 47,104 字节，实际大小可能随源码或编译环境变化。
+需要 Windows x64、Windows PowerShell 和 .NET Framework 自带的 C# 5 编译器。构建会在项目目录生成 `ScreenQuiet.exe`、`LauncherBridge.exe` 和 `tests\ScreenQuietBridgeProbe.exe`。
 
 1. 从 Parsec 官方地址单独下载并安装 [Parsec Virtual Display Driver 0.45.0.0](https://builds.parsec.app/vdd/parsec-vdd-0.45.0.0.exe)。本项目不附带或重新分发驱动。参考安装包的 Authenticode 签名验证有效，签名者为 Parsec Cloud, Inc.，SHA-256 为：
 
@@ -50,15 +50,33 @@ Fn+F9 关闭内置屏，让桌面和远程开发继续运行；物理输入恢�
    powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Finish-Setup.ps1
    ```
 
-   脚本先请求一次管理员确认，测试并配置启动桥，再为当前用户安装控制程序和登录启动项。测试覆盖启动参数转发、热键门控、不同路径隔离及被动启动检查；**安装流程不会自动执行关屏测试**。若系统中存在冲突的 IFEO 设置，安装会停止并保留原配置。
+   脚本先请求一次管理员确认，测试并配置百应启动桥，再为当前用户安装控制程序和计划任务。只有配置百应 IFEO 规则需要管理员确认；计划任务以当前用户交互会话和有限权限运行，无需管理员权限或保存密码。安装会将旧的当前用户登录启动项迁移为计划任务。测试覆盖启动参数转发、热键门控、不同路径隔离及被动启动检查；**安装流程不会自动执行关屏测试**。若系统中存在冲突的 IFEO 设置，安装会停止并保留原配置。
 
 ## 使用与恢复
 
-按 **Fn+F9** 切换关屏模式，再按一次可恢复。关屏期间，识别到的物理键盘、鼠标或触控板活动也会恢复显示。开始菜单中的 **ScreenQuiet - Restore screen** 可手动恢复；命令行也可运行安装目录中的 `ScreenQuiet.exe --restore`。`ScreenQuiet.exe --stop` 会请求恢复并退出。
+按 **Fn+F9** 切换关屏模式，再按一次可恢复。关屏期间，识别到的物理键盘、鼠标或触控板活动也会恢复显示。开始菜单中的 **ScreenQuiet - Restore screen** 可手动恢复；命令行也可运行安装目录中的 `ScreenQuiet.exe --restore`。
 
-状态日志和恢复快照存放在 `%LOCALAPPDATA%\ScreenQuiet`。主程序退出或心跳中断超过 20 秒时，独立恢复进程会尝试还原已保存布局；这项故障路径尚未经过真实故障注入验证。
+状态日志和恢复快照存放在 `%LOCALAPPDATA%\ScreenQuiet`。主程序退出或心跳中断超过 20 秒时，关屏期间启动的独立恢复进程会尝试还原已保存布局。当前用户计划任务在登录时启动控制程序，并每分钟检查一次；运行中的实例会阻止重复启动。任务启动失败时也配置了每分钟间隔的有限重试。任务不会唤醒睡眠中的电脑，错过的启动会在系统可用后补跑。计划任务负责登录启动和进程补拉，不是另一个常驻的守护进程。
 
-卸载时运行当前用户安装目录中的 `Uninstall.ps1`。脚本会先请求恢复显示，再移除登录启动项、快捷方式、程序和本项目的启动规则；系统规则清理需要管理员确认。独立安装的 Parsec 驱动会保留，可从 Windows“设置 → 应用”中单独卸载。卸载脚本不会清除 `%LOCALAPPDATA%\ScreenQuiet` 下的日志和状态文件。
+要长时间暂停，先禁用自动启动任务，再请求程序恢复并退出：
+
+```powershell
+$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$task = "ScreenQuiet-$sid"
+Disable-ScheduledTask -TaskName $task
+& "$env:LOCALAPPDATA\Programs\ScreenQuiet\ScreenQuiet.exe" --stop
+```
+
+恢复自动启动并立即运行：
+
+```powershell
+Enable-ScheduledTask -TaskName $task
+Start-ScheduledTask -TaskName $task
+```
+
+单独运行 `ScreenQuiet.exe --stop` 只会停止当前实例；若任务仍启用，下一次每分钟检查可能重新启动它。
+
+卸载时运行当前用户安装目录中的 `Uninstall.ps1`。脚本会先禁用计划任务，再请求程序恢复显示并退出，然后删除该任务、快捷方式、程序和本项目的启动规则；系统规则清理需要管理员确认。独立安装的 Parsec 驱动会保留，可从 Windows“设置 → 应用”中单独卸载。卸载脚本不会清除 `%LOCALAPPDATA%\ScreenQuiet` 下的日志和状态文件。
 
 ## 参考与许可说明
 
