@@ -4,12 +4,11 @@ using System.ComponentModel;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
-using System.Threading;
 
 namespace ScreenQuiet
 {
-    // Short-lived IFEO bridge. Only launches associated with an actual Lenovo Fn
-    // event are suppressed. Other launches are detached before target code runs.
+    // Short-lived IFEO bridge. The vendor's dedicated customer-service launch
+    // command is suppressed before its launcher can notify or start Baiying.
     internal static class LauncherBridge
     {
         [STAThread] static int Main(string[] args)
@@ -17,7 +16,8 @@ namespace ScreenQuiet
             if(args.Length==0) return 0;
             try
             {
-                if(IsFnLaunch()) return 0;
+                if(IsFnLaunch(args)) { LogRoute("Suppressed vendor customer-service command"); return 0; }
+                LogRoute("Forwarding ordinary vendor launch");
                 return Forward(args);
             }
             catch(Exception ex)
@@ -31,12 +31,24 @@ namespace ScreenQuiet
                 return 1;
             }
         }
-        static bool IsFnLaunch()
+        static bool IsFnLaunch(string[] args)
         {
-            // Only the actual WMI Fn+F9 event opens this short gate. A vendor
-            // parent alone is insufficient: it may launch Baiying for other reasons.
-            try { using(EventWaitHandle gate=EventWaitHandle.OpenExisting("Local\\ScreenQuiet.FnRoute")) return gate.WaitOne(400); }
-            catch(Exception) { return false; }
+            // FnHotkeyUtility calls ShellExecuteW with exactly this command.
+            // Do not depend on a separate WMI callback arriving within a deadline.
+            return args.Length==2 &&
+                String.Equals(Path.GetFileName(args[0]),"LenovoBaiyingLauncher.exe",StringComparison.OrdinalIgnoreCase) &&
+                String.Equals(args[1],"-customerService",StringComparison.OrdinalIgnoreCase);
+        }
+        static void LogRoute(string action)
+        {
+            try
+            {
+                string dir=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"ScreenQuiet");
+                Directory.CreateDirectory(dir);
+                string path=Path.Combine(dir,"bridge-routing.log");
+                if(File.Exists(path) && new FileInfo(path).Length>65536) File.Delete(path);
+                File.AppendAllText(path,DateTime.Now.ToString("s")+" "+action+Environment.NewLine);
+            } catch { }
         }
         static string Quote(string s)
         {

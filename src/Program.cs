@@ -200,8 +200,6 @@ namespace ScreenQuiet
         readonly System.Windows.Forms.Timer poll;
         readonly EventWaitHandle restoreSignal=new EventWaitHandle(false,EventResetMode.AutoReset,"Local\\ScreenQuiet.Restore");
         readonly EventWaitHandle stopSignal=new EventWaitHandle(false,EventResetMode.AutoReset,"Local\\ScreenQuiet.Stop");
-        readonly EventWaitHandle fnGate=new EventWaitHandle(false,EventResetMode.ManualReset,"Local\\ScreenQuiet.FnRoute");
-        readonly System.Threading.Timer gateReset;
         ManagementEventWatcher watcher;
         ParsecDriver driver;
         DisplaySnapshot original,quiet;
@@ -224,12 +222,11 @@ namespace ScreenQuiet
                 throw new InvalidOperationException("未识别到可恢复屏幕的物理键盘，未启用关屏。");
             window=new HotkeyWindow();
             if(observeOnly) RegisterPhysicalInput();
-            gateReset=new System.Threading.Timer(delegate { try { fnGate.Reset(); } catch(ObjectDisposedException) { } },null,Timeout.Infinite,Timeout.Infinite);
             // WMI receives the hardware event even if the vendor launch path varies by firmware.
             watcher=new ManagementEventWatcher(new ManagementScope(@"\\.\root\WMI"),new WqlEventQuery("SELECT * FROM LENOVO_UTILITY_EVENT"));
             watcher.EventArrived+=delegate(object sender,EventArrivedEventArgs e)
             {
-                try { if(Convert.ToUInt32(e.NewEvent["PressTypeDataVal"])==1) { fnGate.Set(); gateReset.Change(3000,Timeout.Infinite); dispatch.BeginInvoke((Action)OnHotkey); } }
+                try { if(Convert.ToUInt32(e.NewEvent["PressTypeDataVal"])==1) { Program.Log("Fn+F9 WMI event received"); dispatch.BeginInvoke((Action)OnHotkey); } }
                 catch(Exception ex) { Program.Log("WMI event: "+ex.Message); }
             };
             watcher.Stopped+=delegate(object sender,StoppedEventArgs e)
@@ -370,7 +367,7 @@ namespace ScreenQuiet
                 disposed=true; poll.Stop(); Restore(); watcher.Stop(); watcher.Dispose(); window.Dispose();
                 Microsoft.Win32.SystemEvents.SessionSwitch-=OnSessionSwitch;
                 Microsoft.Win32.SystemEvents.PowerModeChanged-=OnPowerMode;
-                gateReset.Dispose(); fnGate.Dispose(); stopSignal.Dispose(); restoreSignal.Dispose(); dispatch.Dispose(); poll.Dispose();
+                stopSignal.Dispose(); restoreSignal.Dispose(); dispatch.Dispose(); poll.Dispose();
             }
             base.ExitThreadCore();
         }

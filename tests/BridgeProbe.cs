@@ -9,6 +9,6 @@ class ScreenQuietBridgeProbe
     {
         StringBuilder b=new StringBuilder("Debugger="+IsDebuggerPresent()+"\r\n");
         for(int i=1;i<args.Length;i++) b.AppendLine(Convert.ToBase64String(Encoding.UTF8.GetBytes(args[i])));
-        File.WriteAllText(args[0],b.ToString());
+        File.WriteAllText(args.Length==0?"no-arguments.txt":args[0],b.ToString());
     }
 }
